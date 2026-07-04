@@ -1,0 +1,146 @@
+services:
+  # MySQL Database
+  mysql:
+    image: mysql:8.0
+    container_name: coupon-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: coupon_db
+      MYSQL_USER: coupon_user
+      MYSQL_PASSWORD: coupon_pass
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d
+    networks:
+      - coupon-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # Redis Cache & Distributed Lock
+  redis:
+    image: redis:7-alpine
+    container_name: coupon-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - coupon-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      timeout: 10s
+      retries: 5
+
+  # Coupon Service Instance 1
+  coupon-app-1:
+    build:
+      context: ./coupon-service
+      dockerfile: Dockerfile
+    container_name: coupon-app-1
+    environment:
+      SPRING_APPLICATION_NAME: coupon-app-1
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/coupon_db
+      SPRING_DATASOURCE_USERNAME: coupon_user
+      SPRING_DATASOURCE_PASSWORD: coupon_pass
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      COUPON_LOCK_ENABLED: "true"
+      SERVER_PORT: 8080
+    ports:
+      - "8081:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - coupon-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      timeout: 10s
+      retries: 5
+
+  # Coupon Service Instance 2
+  coupon-app-2:
+    build:
+      context: ./coupon-service
+      dockerfile: Dockerfile
+    container_name: coupon-app-2
+    environment:
+      SPRING_APPLICATION_NAME: coupon-app-2
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/coupon_db
+      SPRING_DATASOURCE_USERNAME: coupon_user
+      SPRING_DATASOURCE_PASSWORD: coupon_pass
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      COUPON_LOCK_ENABLED: "true"
+      SERVER_PORT: 8080
+    ports:
+      - "8082:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - coupon-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      timeout: 10s
+      retries: 5
+
+  # Coupon Service Instance 3
+  coupon-app-3:
+    build:
+      context: ./coupon-service
+      dockerfile: Dockerfile
+    container_name: coupon-app-3
+    environment:
+      SPRING_APPLICATION_NAME: coupon-app-3
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/coupon_db
+      SPRING_DATASOURCE_USERNAME: coupon_user
+      SPRING_DATASOURCE_PASSWORD: coupon_pass
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      COUPON_LOCK_ENABLED: "true"
+      SERVER_PORT: 8080
+    ports:
+      - "8083:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - coupon-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      timeout: 10s
+      retries: 5
+
+  # Nginx Load Balancer
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: coupon-nginx
+    ports:
+      - "80:80"
+    depends_on:
+      - coupon-app-1
+      - coupon-app-2
+      - coupon-app-3
+    networks:
+      - coupon-network
+
+volumes:
+  mysql_data:
+  redis_data:
+
+networks:
+  coupon-network:
+    driver: bridge
