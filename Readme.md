@@ -143,11 +143,11 @@ sequenceDiagram
 
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
-| **Backend** | Spring Boot 3 | REST APIs, Business Logic |
+| **Backend** | Spring Boot 4 | REST APIs, Business Logic |
 | | Spring Data JPA | ORM & Database Access |
 | | MySQL 8 | Persistent Storage |
 | | Redis 7 | Distributed Lock & Cache |
-| | Gradle 8 | Build Tool |
+| | Gradle 9.5 | Build Tool |
 | | JDK 26 | Runtime |
 | **Frontend** | React 19 | UI Framework |
 | | Material UI (MUI) | Component Library |
