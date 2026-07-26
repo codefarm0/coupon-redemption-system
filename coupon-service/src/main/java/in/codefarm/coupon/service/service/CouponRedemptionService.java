@@ -1,6 +1,5 @@
 package in.codefarm.coupon.service.service;
 
-import in.codefarm.coupon.service.controller.CouponController;
 import in.codefarm.coupon.service.dto.CouponResponse;
 import in.codefarm.coupon.service.dto.CreateCouponRequest;
 import in.codefarm.coupon.service.dto.RedeemRequest;
@@ -22,7 +21,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @Service
 public class CouponRedemptionService {
@@ -37,17 +38,20 @@ public class CouponRedemptionService {
     private final CouponRedemptionRepository redemptionRepository;
     private final LockStrategy lockStrategy;
     private final String instanceName;
+    private final TransactionTemplate transactionTemplate;
 
     public CouponRedemptionService(
             CouponRepository couponRepository,
             CouponRedemptionRepository redemptionRepository,
             LockStrategy lockStrategy,
-            @Value("${coupon.instance.name:coupon-app-1}") String instanceName
+            @Value("${spring.application.name:coupon-service}") String instanceName,
+            PlatformTransactionManager transactionManager
     ) {
         this.couponRepository = couponRepository;
         this.redemptionRepository = redemptionRepository;
         this.lockStrategy = lockStrategy;
         this.instanceName = instanceName;
+        this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
     @Transactional
@@ -83,7 +87,7 @@ public class CouponRedemptionService {
                 }
                 
                 if (attempt < MAX_LOCK_RETRIES - 1) {
-                    logger.debug("[LOCK RETRY] User: {}, Coupon: {}, Attempt: {}/{}, Retry in {}ms, Instance: {}", 
+                    logger.info("[LOCK RETRY] User: {}, Coupon: {}, Attempt: {}/{}, Retry in {}ms, Instance: {}",
                         username, couponCode, attempt + 1, MAX_LOCK_RETRIES, delayMs, instanceName);
                     Thread.sleep(delayMs);
                     delayMs = Math.min(delayMs * 2, 1000); // Cap at 1 second
@@ -101,52 +105,56 @@ public class CouponRedemptionService {
         return false;
     }
 
-    @Transactional
     public RedeemResponse redeemCoupon(RedeemRequest request) {
         String lockKey = LOCK_KEY_PREFIX + request.couponCode();
         String lockValue = UUID.randomUUID().toString();
 
+        // Step 1: Acquire lock BEFORE any database transaction
+        boolean acquired = acquireLockWithRetry(lockKey, lockValue, request.couponCode(), request.username());
+        if (!acquired) {
+            logger.warn("[LOCK UNAVAILABLE] User: {}, Coupon: {}, Instance: {}, Reason: Max retries exceeded",
+                    request.username(), request.couponCode(), instanceName);
+            return RedeemResponse.failure("Coupon is busy, please retry.", instanceName);
+        }
+
         try {
-            // Acquire lock with exponential backoff retry
-            boolean acquired = acquireLockWithRetry(lockKey, lockValue, request.couponCode(), request.username());
-            if (!acquired) {
-                logger.warn("[LOCK UNAVAILABLE] User: {}, Coupon: {}, Instance: {}, Reason: Max retries exceeded", 
-                    request.username(), request.couponCode(), instanceName);
-                return RedeemResponse.failure("Coupon is busy, please retry.", instanceName);
-            }
+            // Step 2: Execute database operations inside a transaction (lock is held)
+            return transactionTemplate.execute(status -> {
+                Coupon coupon = couponRepository.findByCode(request.couponCode())
+                        .orElse(null);
 
-            Coupon coupon = couponRepository.findByCode(request.couponCode())
-                    .orElse(null);
+                if (coupon == null) {
+                    logger.error("[COUPON NOT FOUND] User: {}, Coupon Code: {}, Instance: {}",
+                            request.username(), request.couponCode(), instanceName);
+                    return RedeemResponse.failure("Coupon Not Found", instanceName);
+                }
 
-            if (coupon == null) {
-                logger.error("[COUPON NOT FOUND] User: {}, Coupon Code: {}, Instance: {}", 
-                    request.username(), request.couponCode(), instanceName);
-                return RedeemResponse.failure("Coupon Not Found", instanceName);
-            }
+                if (coupon.getRemainingRedemptions() <= 0) {
+                    redemptionRepository.save(
+                            new CouponRedemption(coupon.getId(), request.username(), RedemptionStatus.FAILED));
+                    logger.warn("[COUPON EXHAUSTED] User: {}, Coupon: {}, Remaining: 0, Instance: {}",
+                            request.username(), request.couponCode(), instanceName);
+                    return RedeemResponse.failure("Coupon Exhausted", instanceName);
+                }
 
-            if (coupon.getRemainingRedemptions() <= 0) {
+                coupon.setRemainingRedemptions(coupon.getRemainingRedemptions() - 1);
+                couponRepository.save(coupon);
+
                 redemptionRepository.save(
-                        new CouponRedemption(coupon.getId(), request.username(), RedemptionStatus.FAILED));
-                logger.warn("[COUPON EXHAUSTED] User: {}, Coupon: {}, Remaining: 0, Instance: {}", 
-                    request.username(), request.couponCode(), instanceName);
-                return RedeemResponse.failure("Coupon Exhausted", instanceName);
-            }
+                        new CouponRedemption(coupon.getId(), request.username(), RedemptionStatus.SUCCESS));
 
-            coupon.setRemainingRedemptions(coupon.getRemainingRedemptions() - 1);
-            couponRepository.save(coupon);
+                logger.info("[COUPON REDEEMED] User: {}, Coupon: {}, Remaining: {}, Instance: {}",
+                        request.username(), request.couponCode(), coupon.getRemainingRedemptions(), instanceName);
 
-            redemptionRepository.save(
-                    new CouponRedemption(coupon.getId(), request.username(), RedemptionStatus.SUCCESS));
-
-            logger.info("[COUPON REDEEMED] User: {}, Coupon: {}, Remaining: {}, Instance: {}", 
-                request.username(), request.couponCode(), coupon.getRemainingRedemptions(), instanceName);
-
-            return RedeemResponse.success("Coupon Redeemed", instanceName);
+                return RedeemResponse.success("Coupon Redeemed", instanceName);
+            });
+            // Step 3: Transaction commits here — flush to MySQL
 
         } finally {
+            // Step 4: Release lock AFTER the transaction has committed
             lockStrategy.releaseLock(lockKey, lockValue);
-            logger.debug("[LOCK RELEASED] User: {}, Coupon: {}, Instance: {}", 
-                request.username(), request.couponCode(), instanceName);
+            logger.info("[LOCK RELEASED] User: {}, Coupon: {}, Instance: {}",
+                    request.username(), request.couponCode(), instanceName);
         }
     }
 

@@ -412,36 +412,240 @@ coupon-redemption-system/
 
 ---
 
-## Quick Start
+## Getting Started
 
 ### Prerequisites
 
-- Docker & Docker Compose installed
-- Node.js 18+ (for local frontend development)
-- Git
+- **Docker & Docker Compose** — for MySQL, Redis, and full-stack deployment
+- **Java 26+** — for running the backend via Gradle
+- **Node.js 20+** — for the React frontend
+- **Git**
 
-### Option 1: Run with Docker Compose (Recommended)
+---
 
-**Step 1: Clone and navigate**
+### 1. Running the Full Stack (All Services via Docker Compose)
+
+Start everything — MySQL, Redis, 3 Spring Boot instances, and Nginx:
+
 ```bash
-cd coupon-redemption-system
+# Build and start all services
+docker compose up --build -d
+
+# Check service status
+docker compose ps
+
+# Tail logs for all services
+docker compose logs -f
 ```
 
-**Step 2: Start all services**
+**What starts:**
+
+| Service | Container Name | Port | Purpose |
+|---------|---------------|------|---------|
+| MySQL 8 | `coupon-mysql` | `3306` | Persistent coupon/redemption storage |
+| Redis 7 | `coupon-redis` | `6379` | Distributed locking |
+| App Instance 1 | `coupon-app-1` | `8081` | Spring Boot — lock enabled |
+| App Instance 2 | `coupon-app-2` | `8082` | Spring Boot — lock enabled |
+| App Instance 3 | `coupon-app-3` | `8083` | Spring Boot — lock enabled |
+| Nginx | `coupon-nginx` | `80` | Load balancer (least_conn) |
+
+**Verify everything is healthy:**
 ```bash
-docker-compose up --build -d
+# Nginx health
+curl http://localhost/health
+
+# API via load balancer
+curl http://localhost/api/coupons?page=0&size=5
+
+# Direct to a specific instance
+curl http://localhost:8081/api/coupons
 ```
 
-This will start:
-- ✅ MySQL (Port 3306)
-- ✅ Redis (Port 6379)
-- ✅ 3 Spring Boot instances (Ports 8081, 8082, 8083)
-- ✅ Nginx Load Balancer (Port 80)
+**Access the application:**
+- **API (via Nginx):** `http://localhost/api/`
+- **Direct to instance 1:** `http://localhost:8081/`
+- **Direct to instance 2:** `http://localhost:8082/`
+- **Direct to instance 3:** `http://localhost:8083/`
 
-**Step 3: Access the application**
-- Frontend: `http://localhost:5175` (after starting React dev server)
-- API (via Nginx): `http://localhost/api/coupons`
-- Direct instances: `http://localhost:8081/api/coupons`
+> The frontend connects to the API at `http://localhost/` (Nginx) when served via Docker, or at `http://localhost:8085/` when running the React dev server locally.
+
+---
+
+### 2. Running Backend with Docker (MySQL + Redis + Nginx)
+
+#### Option A: Full Stack (recommended for testing)
+```bash
+docker compose up --build -d
+```
+
+#### Option B: Infrastructure only (MySQL + Redis — run app locally via Gradle)
+Start only the data services and develop the backend with hot-reload:
+
+```bash
+# Start only MySQL and Redis
+docker compose up -d mysql redis
+
+# Verify they're healthy
+docker compose ps
+```
+
+Then run the Spring Boot app locally:
+
+```bash
+# From coupon-service/
+./gradlew bootRun
+```
+
+The app will connect to MySQL at `localhost:3306` and Redis at `localhost:6379` as configured in `application.yaml`.
+
+#### Toggling the Distributed Lock
+
+No code changes needed — just flip the config:
+
+```bash
+# Disable lock (observe race condition)
+COUPON_LOCK_ENABLED=false docker compose up -d coupon-app-1
+
+# Enable lock (strict counting)
+COUPON_LOCK_ENABLED=true docker compose up -d coupon-app-1
+```
+
+Or edit `application.yaml`:
+```yaml
+coupon:
+  lock:
+    enabled: false   # Set to false to simulate race conditions
+```
+
+---
+
+### 3. Connecting to MySQL and Redis
+
+#### MySQL
+
+```bash
+# Connect via CLI
+docker exec -it coupon-mysql mysql -u coupon_user -p coupon_db
+# Password: coupon_pass
+
+# Or as root
+docker exec -it coupon-mysql mysql -u root -p
+# Password: root
+```
+
+**Useful queries:**
+```sql
+-- List all coupons
+SELECT id, code, total_redemptions, remaining_redemptions, created_at
+FROM coupons \G
+
+-- Check remaining counts
+SELECT code, remaining_redemptions
+FROM coupons
+WHERE code = 'SUMMER50';
+
+-- View recent redemptions
+SELECT cr.username, c.code, cr.status, cr.redeemed_at
+FROM coupon_redemptions cr
+JOIN coupons c ON c.id = cr.coupon_id
+ORDER BY cr.redeemed_at DESC
+LIMIT 20;
+
+-- Count successes vs failures per coupon
+SELECT c.code,
+       SUM(CASE WHEN cr.status = 'SUCCESS' THEN 1 ELSE 0 END) AS successes,
+       SUM(CASE WHEN cr.status = 'FAILED' THEN 1 ELSE 0 END) AS failures
+FROM coupon_redemptions cr
+JOIN coupons c ON c.id = cr.coupon_id
+GROUP BY c.code;
+```
+
+#### Redis
+
+```bash
+# Connect via CLI
+docker exec -it coupon-redis redis-cli
+
+# Or with specific host/port
+redis-cli -h localhost -p 6379
+```
+
+**Useful commands:**
+```bash
+# List all lock keys
+KEYS coupon:lock:*
+
+# Check if a specific lock exists
+GET coupon:lock:SUMMER50
+
+# Get TTL of a lock
+TTL coupon:lock:SUMMER50
+
+# Monitor live lock operations
+MONITOR
+
+# Clear all locks (reset)
+FLUSHALL
+
+# Check Redis info
+INFO
+```
+
+#### Connecting from applications / GUI tools
+
+| Tool | MySQL | Redis |
+|------|-------|-------|
+| **Host** | `localhost` | `localhost` |
+| **Port** | `3306` | `6379` |
+| **Database** | `coupon_db` | — |
+| **Username** | `coupon_user` | — |
+| **Password** | `coupon_pass` | — |
+
+> GUI clients like **DBeaver**, **TablePlus**, **Redis Insight**, or **Another Redis Desktop Manager** can connect using the above credentials.
+
+---
+
+### 4. Running the Frontend
+
+#### Option A: With Mock Data (no backend required)
+
+The frontend includes an in-memory mock API that simulates all backend endpoints. No MySQL, Redis, or Java needed:
+
+```bash
+cd frontend-react
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173` (or the port shown in terminal).
+
+**What the mock provides:**
+- 25 pre-seeded coupons across 5 pages
+- Click "Claim x10/x100/x1000" to simulate concurrent users
+- Lock toggle in the top bar switches between strict and oversell modes
+- Redemption history tracked in memory
+- Random Indian names (Rahul, Priya, Neha, ...) generated for simulation
+
+> Use this for UI development or demonstrations without infrastructure.
+
+#### Option B: Connected to the Real Backend
+
+```bash
+# Step 1: Start the backend
+docker compose up -d
+
+# Step 2: Update the frontend API URL
+# Edit frontend-react/src/api/mockApi.js
+# Replace mock implementations with real fetch calls to:
+# http://localhost/api/coupons
+
+# Step 3: Start the frontend
+cd frontend-react
+npm install
+npm run dev
+```
+
+> When the real backend is connected, the lock toggle in the Docker backend (`coupon.lock.enabled`) controls the race condition behavior. The frontend's toggle is only for mock mode.
 
 ---
 
