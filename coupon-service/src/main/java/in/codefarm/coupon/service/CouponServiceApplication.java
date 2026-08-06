@@ -1,5 +1,6 @@
 package in.codefarm.coupon.service;
 
+import in.codefarm.coupon.service.entity.Coupon;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
@@ -8,6 +9,9 @@ public class CouponServiceApplication {
 
 	public static void main(String[] args) {
 		SpringApplication.run(CouponServiceApplication.class, args);
+
+		Coupon c = new Coupon();
+		c.setRemainingRedemptions(12);
 	}
 
 }
